@@ -1,0 +1,91 @@
+{
+  "info": {
+    "name": "Distributed Document Search",
+    "_postman_id": "9f3c1a7b-0d2e-4c30-8a61-4b2f9b4a7e11",
+    "description": "Prototype endpoints for the SE technical assessment.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8000" },
+    { "key": "tenantId", "value": "acme" },
+    { "key": "docId", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": { "raw": "{{baseUrl}}/health", "host": ["{{baseUrl}}"], "path": ["health"] }
+      }
+    },
+    {
+      "name": "Index document",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "const json = pm.response.json();",
+              "if (json.id) pm.collectionVariables.set('docId', json.id);"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "X-Tenant-ID", "value": "{{tenantId}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"title\": \"Q1 2026 Earnings\",\n  \"body\": \"Revenue grew 28% year over year, driven by enterprise adoption of the search product.\",\n  \"tags\": [\"finance\", \"earnings\", \"2026\"],\n  \"metadata\": {\"author\": \"ada\", \"confidential\": false}\n}"
+        },
+        "url": { "raw": "{{baseUrl}}/documents", "host": ["{{baseUrl}}"], "path": ["documents"] }
+      }
+    },
+    {
+      "name": "Get document",
+      "request": {
+        "method": "GET",
+        "header": [ { "key": "X-Tenant-ID", "value": "{{tenantId}}" } ],
+        "url": { "raw": "{{baseUrl}}/documents/{{docId}}", "host": ["{{baseUrl}}"], "path": ["documents", "{{docId}}"] }
+      }
+    },
+    {
+      "name": "Search",
+      "request": {
+        "method": "GET",
+        "header": [ { "key": "X-Tenant-ID", "value": "{{tenantId}}" } ],
+        "url": {
+          "raw": "{{baseUrl}}/search?q=earnings&size=10&offset=0",
+          "host": ["{{baseUrl}}"],
+          "path": ["search"],
+          "query": [
+            { "key": "q", "value": "earnings" },
+            { "key": "size", "value": "10" },
+            { "key": "offset", "value": "0" }
+          ]
+        }
+      }
+    },
+    {
+      "name": "Delete document",
+      "request": {
+        "method": "DELETE",
+        "header": [ { "key": "X-Tenant-ID", "value": "{{tenantId}}" } ],
+        "url": { "raw": "{{baseUrl}}/documents/{{docId}}", "host": ["{{baseUrl}}"], "path": ["documents", "{{docId}}"] }
+      }
+    },
+    {
+      "name": "Tenant isolation — wrong tenant (expect 404)",
+      "request": {
+        "method": "GET",
+        "header": [ { "key": "X-Tenant-ID", "value": "globex" } ],
+        "url": { "raw": "{{baseUrl}}/documents/{{docId}}", "host": ["{{baseUrl}}"], "path": ["documents", "{{docId}}"] }
+      }
+    }
+  ]
+}
