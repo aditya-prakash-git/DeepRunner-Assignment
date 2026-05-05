@@ -74,9 +74,13 @@ Delete is the same, with op=`delete` and a soft-delete on Postgres (`deleted_at`
 ```
 Client → GET /search?q=… (X-Tenant-ID)
        → middleware: tenant auth + token-bucket rate limit
-       → cache key sha1(tenant|q|size|offset) — hit returns in <5ms
-       → miss: OpenSearch multi_match with mandatory tenant_id filter + routing
-       → populate cache (TTL 30s) → respond
+       → cache key sha1(tenant|q|size|offset|sorted_tags|facets_flag)
+       → hit  → respond + X-Cache: hit
+       → miss → OpenSearch multi_match with mandatory tenant_id filter + routing
+              → populate hot cache (TTL 30s) and stale cache (TTL 30min)
+              → respond + X-Cache: miss
+       → OpenSearch error → serve stale cache + X-Cache: stale-while-error
+                          → no stale entry → 503 search_unavailable
 ```
 
 ## 3. Storage strategy
@@ -99,7 +103,7 @@ GET    /search?q=…&size=&offset=&tag=…&facets=true
 GET    /health                 200  { status, dependencies{ postgres, redis, opensearch } }
 ```
 
-Search supports tag filtering (repeatable `tag=` query param — terms filter on the `tags` keyword field) and faceted aggregation (`facets=true` returns a tag-bucket histogram). All non-public endpoints require `X-Tenant-ID`. Responses use JSON; errors follow `{error, detail}`. Rate-limited responses additionally carry `X-RateLimit-Limit` / `X-RateLimit-Remaining`.
+Search supports tag filtering (repeatable `tag=` query param — AND semantics, every tag must be present on the document) and faceted aggregation (`facets=true` returns a tag-bucket histogram). All non-public endpoints require `X-Tenant-ID`. Responses use JSON; errors follow `{error, detail}`. Search responses carry `X-Cache: hit | miss | stale-while-error`. Rate-limited responses additionally carry `X-RateLimit-Limit` / `X-RateLimit-Remaining`.
 
 ## 5. Consistency model
 
@@ -111,11 +115,12 @@ Search supports tag filtering (repeatable `tag=` query param — terms filter on
 
 | Layer | What | TTL | Keyed on |
 |---|---|---|---|
-| L1 — Redis query cache | `/search` response body | 30s | `tenant_id + q + size + offset` (sha1) |
+| L1 hot — Redis query cache | `/search` response body | 30s | `sc:{tenant_id}:sha1(tenant\|q\|size\|offset\|sorted_tags\|facets_flag)` |
+| L1 stale — graceful-degrade copy | same body, served on OS failure | 30 min | same key + `:stale` suffix |
 | L2 — OpenSearch request cache | repeated aggs / filters | default | cluster-managed |
 | L3 — page cache | OS-level fs cache on shards | implicit | OS workload |
 
-We deliberately **cache per-tenant** — never share cache entries across tenants. The key prefix includes `tenant_id` so key collision is structurally impossible.
+We deliberately **cache per-tenant** — never share cache entries across tenants. The key prefix includes `tenant_id` so key collision is structurally impossible. The stale layer exists for the failure mode in §5: if OpenSearch errors out, the route returns the stale body with `X-Cache: stale-while-error` instead of failing the request.
 
 ## 7. Message queue usage
 
@@ -133,7 +138,11 @@ Failure handling: unacked entries stay in XPENDING. The indexer's main loop runs
 - **Quotas**: per-tenant rate limit (default 50 rps, overrideable in the `tenants` row) via a Redis-backed **token bucket** (atomic Lua, server-side TIME, smooth refill). Capacity = `rps × burst_multiplier`; refill rate = `rps`. The response carries `X-RateLimit-Limit` and `X-RateLimit-Remaining`.
 - **Upgrade path**: for compliance-tier tenants we migrate to index-per-tenant behind an alias — the code only needs to swap a resolver.
 
-## 9. Trade-offs (explicit)
+## 9. Bounded timeouts
+
+No code path can hang on a wedged backend. OpenSearch client `timeout=0.7s` on the API and `5s` on the indexer. Postgres `command_timeout=0.5s` on the API, `2s` on the indexer. Redis `socket_timeout=0.1s` on the API. The `/search` route catches OpenSearch exceptions and falls back to the stale cache (see §6); if no stale entry exists, returns 503.
+
+## 10. Trade-offs (explicit)
 
 | Decision | Upside | Downside | Mitigation |
 |---|---|---|---|
