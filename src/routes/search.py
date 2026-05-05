@@ -5,7 +5,7 @@ import json
 import logging
 import time
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Query, Request, Response
 from fastapi.responses import JSONResponse
 
 from ..config import settings
@@ -33,6 +33,7 @@ def _cache_key(
 @router.get("/search", response_model=SearchResponse)
 async def search(
     request: Request,
+    response: Response,
     q: str = Query(..., min_length=1, max_length=512),
     size: int = Query(10, ge=1, le=100),
     offset: int = Query(0, ge=0, le=10_000),
@@ -62,6 +63,7 @@ async def search(
         payload = json.loads(cached)
         payload["cache"] = "hit"
         payload["took_ms"] = int((time.perf_counter() - started) * 1000)
+        response.headers["X-Cache"] = "hit"
         return SearchResponse(**payload)
 
     body = build_search_query(
@@ -135,4 +137,5 @@ async def search(
         await state.redis.set(key + ":stale", serialized, ex=settings.search_cache_ttl_seconds * 60)
     except Exception:
         log.exception("cache_set_failed")
+    response.headers["X-Cache"] = "miss"
     return SearchResponse(**payload)

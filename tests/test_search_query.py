@@ -26,11 +26,14 @@ def test_query_pagination():
     assert q["size"] == 25
 
 
-def test_query_with_tag_filter_adds_terms_filter():
+def test_query_with_tag_filter_adds_per_tag_term_filters():
+    """Tag filter is AND semantics: every tag must match. We emit one
+    `term` filter per tag rather than a single `terms` filter (which is OR)."""
     q = build_search_query("acme", "hello", size=10, offset=0, tag_filters=["finance", "2026"])
     filters = q["query"]["bool"]["filter"]
     assert {"term": {"tenant_id": "acme"}} in filters
-    assert {"terms": {"tags": ["finance", "2026"]}} in filters
+    assert {"term": {"tags": "finance"}} in filters
+    assert {"term": {"tags": "2026"}} in filters
 
 
 def test_query_with_facets_adds_aggs():

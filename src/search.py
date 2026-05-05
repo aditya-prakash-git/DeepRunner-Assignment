@@ -55,7 +55,8 @@ def build_search_query(
 ) -> dict[str, Any]:
     filters: list[dict[str, Any]] = [{"term": {"tenant_id": tenant_id}}]
     if tag_filters:
-        filters.append({"terms": {"tags": tag_filters}})
+        # AND semantics: every tag must be present on the document.
+        filters.extend({"term": {"tags": t}} for t in tag_filters)
 
     body: dict[str, Any] = {
         "from": offset,
