@@ -18,6 +18,15 @@ class Settings(BaseSettings):
     default_rate_limit_rps: int = 50
     rate_limit_burst_multiplier: int = 2
 
+    # Client timeouts — prevent unbounded waits on a single slow dependency.
+    opensearch_timeout_seconds: float = 0.7
+    postgres_command_timeout_seconds: float = 0.5
+    redis_socket_timeout_seconds: float = 0.1
+
+    # Indexer DLQ
+    indexer_max_deliveries: int = 5
+    index_dlq_stream: str = "docs.index.dlq"
+
     model_config = SettingsConfigDict(env_file=".env", case_sensitive=False)
 
 

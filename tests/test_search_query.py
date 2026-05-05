@@ -24,3 +24,21 @@ def test_query_pagination():
     q = build_search_query("acme", "x", size=25, offset=50)
     assert q["from"] == 50
     assert q["size"] == 25
+
+
+def test_query_with_tag_filter_adds_terms_filter():
+    q = build_search_query("acme", "hello", size=10, offset=0, tag_filters=["finance", "2026"])
+    filters = q["query"]["bool"]["filter"]
+    assert {"term": {"tenant_id": "acme"}} in filters
+    assert {"terms": {"tags": ["finance", "2026"]}} in filters
+
+
+def test_query_with_facets_adds_aggs():
+    q = build_search_query("acme", "hello", size=10, offset=0, facets=True)
+    assert "aggs" in q
+    assert q["aggs"]["tags"]["terms"]["field"] == "tags"
+
+
+def test_query_without_facets_omits_aggs():
+    q = build_search_query("acme", "hello", size=10, offset=0)
+    assert "aggs" not in q

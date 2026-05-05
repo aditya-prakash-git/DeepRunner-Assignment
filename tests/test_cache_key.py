@@ -16,3 +16,17 @@ def test_cache_key_is_deterministic():
 def test_cache_key_changes_on_pagination():
     assert _cache_key("acme", "q", 10, 0) != _cache_key("acme", "q", 10, 10)
     assert _cache_key("acme", "q", 10, 0) != _cache_key("acme", "q", 20, 0)
+
+
+def test_cache_key_changes_on_tag_filter():
+    assert _cache_key("acme", "q", 10, 0) != _cache_key("acme", "q", 10, 0, ("finance",))
+
+
+def test_cache_key_tag_order_independent():
+    a = _cache_key("acme", "q", 10, 0, ("finance", "2026"))
+    b = _cache_key("acme", "q", 10, 0, ("2026", "finance"))
+    assert a == b
+
+
+def test_cache_key_changes_on_facets_flag():
+    assert _cache_key("acme", "q", 10, 0) != _cache_key("acme", "q", 10, 0, (), True)

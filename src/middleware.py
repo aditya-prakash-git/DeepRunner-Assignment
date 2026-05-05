@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import time
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
@@ -59,17 +58,45 @@ class TenantAuthMiddleware(BaseHTTPMiddleware):
 class RateLimitMiddleware(BaseHTTPMiddleware):
     """Per-tenant token bucket stored in Redis.
 
-    Algorithm: atomic Lua script increments a fixed-window counter keyed on
-    tenant + 1-second bucket. Simple, lock-free, and deterministic. Swap for
-    a sliding-window script in production if burst smoothing matters.
+    Algorithm: atomic Lua script that maintains (tokens, updated_at) per tenant.
+    On each request, refill = (now - updated_at) * refill_rate, capped at capacity.
+    If tokens >= 1, allow and decrement; otherwise reject with 429. Server-side
+    TIME removes client clock skew. Smooth refill avoids the 2x boundary spike of
+    a fixed-window counter.
+
+    Returns {allowed, remaining_tokens} so the response can carry
+    X-RateLimit-Remaining for client back-pressure.
     """
 
-    LUA_SCRIPT = """
-    local current = redis.call('INCR', KEYS[1])
-    if current == 1 then
-        redis.call('EXPIRE', KEYS[1], ARGV[2])
+    LUA_TOKEN_BUCKET = """
+    local capacity = tonumber(ARGV[1])
+    local refill = tonumber(ARGV[2])
+    local requested = tonumber(ARGV[3])
+
+    local t = redis.call('TIME')
+    local now = tonumber(t[1]) + tonumber(t[2]) / 1000000
+
+    local data = redis.call('HMGET', KEYS[1], 'tokens', 'updated_at')
+    local tokens = tonumber(data[1])
+    local updated_at = tonumber(data[2])
+    if tokens == nil then
+        tokens = capacity
+        updated_at = now
     end
-    return current
+
+    local delta = math.max(0, now - updated_at)
+    tokens = math.min(capacity, tokens + delta * refill)
+
+    local allowed = 0
+    if tokens >= requested then
+        tokens = tokens - requested
+        allowed = 1
+    end
+
+    redis.call('HMSET', KEYS[1], 'tokens', tokens, 'updated_at', now)
+    redis.call('EXPIRE', KEYS[1], math.ceil(capacity / refill) + 1)
+
+    return {allowed, tostring(tokens)}
     """
 
     async def dispatch(self, request: Request, call_next):
@@ -77,25 +104,37 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         if tenant_id is None:
             return await call_next(request)
 
-        limit = getattr(request.state, "rate_limit_rps", settings.default_rate_limit_rps)
-        burst = limit * settings.rate_limit_burst_multiplier
+        refill = getattr(request.state, "rate_limit_rps", settings.default_rate_limit_rps)
+        capacity = refill * settings.rate_limit_burst_multiplier
 
         r = state.redis
         if r is None:
             return await call_next(request)
 
-        bucket = int(time.time())
-        key = f"rl:{tenant_id}:{bucket}"
+        key = f"rl:{tenant_id}"
         try:
-            count = await r.eval(self.LUA_SCRIPT, 1, key, str(burst), "2")
+            result = await r.eval(
+                self.LUA_TOKEN_BUCKET, 1, key, str(capacity), str(refill), "1"
+            )
         except Exception:
             log.exception("rate_limit_error")
             return await call_next(request)
 
-        if int(count) > burst:
+        allowed, remaining_str = result
+        remaining = max(0, int(float(remaining_str)))
+
+        if int(allowed) == 0:
             return JSONResponse(
-                {"error": "rate_limited", "detail": f"exceeded {burst} req/s"},
+                {"error": "rate_limited", "detail": f"capacity {capacity}, refill {refill}/s"},
                 status_code=429,
-                headers={"Retry-After": "1"},
+                headers={
+                    "Retry-After": "1",
+                    "X-RateLimit-Limit": str(capacity),
+                    "X-RateLimit-Remaining": "0",
+                },
             )
-        return await call_next(request)
+
+        response = await call_next(request)
+        response.headers["X-RateLimit-Limit"] = str(capacity)
+        response.headers["X-RateLimit-Remaining"] = str(remaining)
+        return response

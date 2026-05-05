@@ -24,13 +24,22 @@ async def lifespan(app: FastAPI):
     log.info("starting up", extra={"env": settings.app_env})
 
     state.pg_pool = await asyncpg.create_pool(
-        settings.postgres_dsn, min_size=1, max_size=10
+        settings.postgres_dsn,
+        min_size=1,
+        max_size=10,
+        command_timeout=settings.postgres_command_timeout_seconds,
     )
-    state.redis = redis.from_url(settings.redis_url, decode_responses=True)
+    state.redis = redis.from_url(
+        settings.redis_url,
+        decode_responses=True,
+        socket_timeout=settings.redis_socket_timeout_seconds,
+        socket_connect_timeout=settings.redis_socket_timeout_seconds,
+    )
     state.opensearch = AsyncOpenSearch(
         hosts=[settings.opensearch_url],
         verify_certs=False,
         ssl_show_warn=False,
+        timeout=settings.opensearch_timeout_seconds,
     )
     await ensure_index(state.opensearch)
 

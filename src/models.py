@@ -38,8 +38,14 @@ class SearchHit(BaseModel):
     tags: list[str] = Field(default_factory=list)
 
 
+class FacetBucket(BaseModel):
+    value: str
+    count: int
+
+
 class SearchResponse(BaseModel):
     took_ms: int
     total: int
     hits: list[SearchHit]
     cache: str = "miss"
+    facets: dict[str, list[FacetBucket]] | None = None

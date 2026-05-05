@@ -94,12 +94,12 @@ Client → GET /search?q=… (X-Tenant-ID)
 POST   /documents              202  { id, status }
 GET    /documents/{id}         200  { id, tenant_id, title, body, tags, metadata, timestamps }
 DELETE /documents/{id}         202  { id, status: "accepted" }
-GET    /search?q=…&size=&offset=
-                               200  { took_ms, total, hits[], cache }
+GET    /search?q=…&size=&offset=&tag=…&facets=true
+                               200  { took_ms, total, hits[], cache, facets? }
 GET    /health                 200  { status, dependencies{ postgres, redis, opensearch } }
 ```
 
-All non-public endpoints require `X-Tenant-ID`. Responses use JSON; errors follow `{error, detail}`.
+Search supports tag filtering (repeatable `tag=` query param — terms filter on the `tags` keyword field) and faceted aggregation (`facets=true` returns a tag-bucket histogram). All non-public endpoints require `X-Tenant-ID`. Responses use JSON; errors follow `{error, detail}`. Rate-limited responses additionally carry `X-RateLimit-Limit` / `X-RateLimit-Remaining`.
 
 ## 5. Consistency model
 
@@ -123,14 +123,14 @@ Redis Streams carries:
 - `docs.index.v1` — upsert/delete events. Consumer group `indexers`, consumers horizontally scale.
 - MAXLEN ≈ 100k with approximate trimming keeps the stream bounded.
 
-Failure handling: unacked entries stay in XPENDING. In production, a reaper claims entries idle > N seconds via XCLAIM and retries; after K attempts they route to a dead-letter stream.
+Failure handling: unacked entries stay in XPENDING. The indexer's main loop runs `XAUTOCLAIM` against entries idle > 30s and re-processes them. Each retry consults `XPENDING` for the delivery count; once `times_delivered ≥ indexer_max_deliveries` (default 5) the entry is XADDed to `docs.index.dlq` and XACKed off the main stream so a poison message cannot block the partition. The DLQ is the alerting surface — a healthy system has zero entries here.
 
 ## 8. Multi-tenancy
 
 - **Auth**: `X-Tenant-ID` header validated against `tenants` table in Postgres. (Prototype shortcut — production uses a signed JWT; see production-readiness.md.)
 - **Logical isolation**: every OpenSearch query contains a mandatory `term` filter on `tenant_id`, enforced server-side — the API does not accept a tenant filter from the client.
 - **Shard affinity**: `routing=tenant_id` co-locates a tenant's docs on one shard, keeping per-query fan-out tight.
-- **Quotas**: per-tenant rate limit (default 50 rps, overrideable in the `tenants` row) via a Redis fixed-window counter.
+- **Quotas**: per-tenant rate limit (default 50 rps, overrideable in the `tenants` row) via a Redis-backed **token bucket** (atomic Lua, server-side TIME, smooth refill). Capacity = `rps × burst_multiplier`; refill rate = `rps`. The response carries `X-RateLimit-Limit` and `X-RateLimit-Remaining`.
 - **Upgrade path**: for compliance-tier tenants we migrate to index-per-tenant behind an alias — the code only needs to swap a resolver.
 
 ## 9. Trade-offs (explicit)
@@ -141,4 +141,4 @@ Failure handling: unacked entries stay in XPENDING. In production, a reaper clai
 | Single shared OS index | Cheap, one index to operate | Noisy-neighbor risk; weaker blast-radius control | Per-tenant shard routing; escape hatch to index-per-tenant |
 | Redis Streams | No extra broker, at-least-once | Lower throughput ceiling than Kafka; no infinite retention | Migrate to Kafka at ~50k msg/s |
 | Header-based tenancy | Simple prototype | Trivially spoofable | JWT in production (see prod-readiness) |
-| Fixed-window rate limit | Lock-free, trivial | Double-count on bucket boundary | Upgrade to sliding window for strict SLAs |
+| Token-bucket rate limit | Smooth refill, per-tenant burst, returns remaining tokens | Single-Redis hot key per tenant | Shard Redis when a tenant's traffic dominates; pre-decrement at edge for very strict SLAs |

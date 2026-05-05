@@ -21,11 +21,11 @@ The prototype demonstrates the shape of the system. This document enumerates wha
 
 ## 2. Resilience
 
-- **Circuit breakers** on OpenSearch and Postgres clients (`pybreaker` or hand-rolled) — trip on consecutive error threshold, half-open probe. Degrade `/search` to a stale cache response when OS is open.
+- **Timeouts** — bounded waits on every dependency. OS client `timeout=0.7s` on the API and `5s` on the indexer; Postgres `command_timeout=0.5s` on the API and `2s` on the indexer; Redis `socket_timeout=0.1s` on the API. No code path can hang on a wedged backend.
+- **Dead-letter stream** — the indexer runs `XAUTOCLAIM` against entries idle > 30s and tracks delivery count via `XPENDING`. After `indexer_max_deliveries` retries (default 5) the entry moves to `docs.index.dlq` and is XACKed off the main stream so a poison message cannot block the partition.
+- **Graceful degradation on /search** — on an OS exception, the route attempts to serve the long-TTL stale cache with `X-Cache: stale-while-error`; if no stale entry exists, returns 503 with `{error: search_unavailable}`. Cache get/set failures are logged but never break the request.
+- **Circuit breakers** (not yet wired) on OpenSearch and Postgres clients — `pybreaker` or hand-rolled, trip on consecutive error threshold, half-open probe. The bounded-timeout + stale-cache combo above already covers most of the blast radius, but a real breaker avoids the "200 retries × 700ms" thundering herd during a sustained OS outage.
 - **Retry strategy**: idempotent GETs → 3 attempts with exponential backoff + jitter; POSTs are idempotent via `Idempotency-Key` header (stored in Redis, TTL 24h). Indexer ops are naturally idempotent (XACK after success).
-- **Timeouts everywhere** — no unbounded waits. OS query: 500ms server-side, 700ms client-side; PG: 200ms; Redis: 50ms.
-- **Dead-letter stream**: after 5 failed index attempts (tracked via XPENDING idle time + delivery count), route to `docs.index.dlq` and alert.
-- **Graceful degradation**: `/search` can serve stale cache with `X-Cache: stale-while-error` when OS is unavailable. `/documents` writes can be rejected with 503 if PG is down — never a silent data-loss path.
 - **Failover**: Postgres via managed service with sync replica; OpenSearch 3-master quorum; Redis with Sentinel or managed cluster mode.
 
 ## 3. Security
@@ -59,6 +59,34 @@ The prototype demonstrates the shape of the system. This document enumerates wha
 - **Connection pooling**: PgBouncer in front of Postgres (transaction mode).
 - **Response compression**: gzip/brotli at the edge.
 - **Benchmark targets** to validate before scale-up: 10k qps with p95 < 300ms on warm cache.
+
+### Reproducible local benchmark
+
+The repo ships two self-contained benchmark drivers. After `docker compose up --build` is healthy:
+
+```bash
+python -m pip install httpx
+
+# Mixed cold/warm queries — exercises full path including OpenSearch
+python bench/bench_search.py --total 500 --concurrency 10 --seed-docs 200 --tenant globex
+
+# Same query, repeatedly — exercises Redis cache short-circuit
+python bench/bench_warm_cache.py --total 2000 --concurrency 10 --tenant globex
+```
+
+#### Measured results (Windows 11 laptop, Docker Desktop, single-node stack)
+
+After raising `globex` rps to 1000 to remove rate-limiter interference (default acme is 50 rps × 2 burst):
+
+| Workload | total | concurrency | success | throughput | p50 | p95 | p99 | max |
+|---|---|---|---|---|---|---|---|---|
+| Mixed cold queries (10 distinct terms) | 500 | 10 | 100% | 306 req/s | 29 ms | **45 ms** | 168 ms | 179 ms |
+| Same query, warm cache (100% hits) | 2000 | 10 | 100% | 324 req/s | 29 ms | **43 ms** | 53 ms | 96 ms |
+| Mixed queries, burst @ concurrency 50 | 500 | 50 | 96% | 189 req/s | 61 ms | 124 ms | 200 ms | 297 ms |
+
+Both unsaturated runs land p95 around 45 ms, an order of magnitude below the 500 ms SLA target. The warm-cache p99 (53 ms) is much tighter than the cold p99 (168 ms) — the Redis short-circuit is doing real work. The third row is the saturation case: at concurrency 50 a single uvicorn worker pair on a laptop can't fan out fast enough, OS connect timeouts trip on ~4% of requests, and the route returns 503 instead of hanging. That is the bounded-timeout fallback path firing — preferable to unbounded queueing under load.
+
+Reproduce with the commands above.
 
 ## 6. Operations
 

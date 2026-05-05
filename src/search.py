@@ -45,13 +45,24 @@ async def ensure_index(os_client: AsyncOpenSearch) -> None:
         await os_client.indices.create(index=settings.index_name, body=INDEX_MAPPING)
 
 
-def build_search_query(tenant_id: str, q: str, size: int, offset: int) -> dict[str, Any]:
-    return {
+def build_search_query(
+    tenant_id: str,
+    q: str,
+    size: int,
+    offset: int,
+    tag_filters: list[str] | None = None,
+    facets: bool = False,
+) -> dict[str, Any]:
+    filters: list[dict[str, Any]] = [{"term": {"tenant_id": tenant_id}}]
+    if tag_filters:
+        filters.append({"terms": {"tags": tag_filters}})
+
+    body: dict[str, Any] = {
         "from": offset,
         "size": size,
         "query": {
             "bool": {
-                "filter": [{"term": {"tenant_id": tenant_id}}],
+                "filter": filters,
                 "must": [
                     {
                         "multi_match": {
@@ -71,3 +82,8 @@ def build_search_query(tenant_id: str, q: str, size: int, offset: int) -> dict[s
             }
         },
     }
+    if facets:
+        body["aggs"] = {
+            "tags": {"terms": {"field": "tags", "size": 20}},
+        }
+    return body

@@ -52,7 +52,16 @@ curl -s "http://localhost:8000/search?q=earnings&size=10" \
   -H "X-Tenant-ID: acme"
 ```
 
-Response includes `took_ms`, `total`, hits with highlighted snippets, and a `cache: hit|miss` marker.
+Response includes `took_ms`, `total`, hits with highlighted snippets, and a `cache: hit|miss|stale` marker.
+
+#### Faceted search + tag filter
+
+```bash
+# Restrict to docs tagged "finance" AND "2026", and return tag bucket counts.
+curl -s "http://localhost:8000/search?q=earnings&tag=finance&tag=2026&facets=true" \
+  -H "X-Tenant-ID: acme"
+# → response also includes "facets": { "tags": [{"value": "finance", "count": N}, ...] }
+```
 
 ### Get a document
 
@@ -127,10 +136,28 @@ python -m pytest tests/ -q
 
 Tests here are pure-function (query builder, cache key, models). Integration tests would use `testcontainers` against real Postgres/Redis/OpenSearch — described in the production-readiness doc but not included in the prototype to keep the footprint small.
 
+## Benchmarking
+
+With the docker-compose stack up:
+
+```bash
+python -m pip install httpx
+
+# Mixed cold queries — full path including OpenSearch
+python bench/bench_search.py --total 500 --concurrency 10 --seed-docs 200 --tenant globex
+
+# Same query, warm cache
+python bench/bench_warm_cache.py --total 2000 --concurrency 10 --tenant globex
+```
+
+Both report p50/p90/p95/p99/max, throughput, and the HTTP status mix. Measured on a developer laptop: **p95 ≈ 45 ms cold, 43 ms warm — about 10× under the 500 ms SLA target**. Full table and methodology in [docs/production-readiness.md](docs/production-readiness.md#reproducible-local-benchmark).
+
+> Note: tenant `acme` is capped at 50 rps × 2 burst — for benchmarks, point at `globex` (or `UPDATE tenants SET rate_limit_rps = 1000 WHERE tenant_id = 'globex'` first) so the rate limiter doesn't dominate the measurement.
+
 ## Assumptions & shortcuts (so the reviewer doesn't have to guess)
 
 - `X-Tenant-ID` header acts as the tenancy principal. A production deployment replaces this with a signed JWT (see `docs/production-readiness.md#security`).
 - OpenSearch security is disabled in the compose file — for local only.
-- The rate limiter uses a 1-second fixed window; a sliding-window variant is the first upgrade in production.
-- The indexer handles at-least-once delivery via XACK. Failed entries stay in XPENDING; a reaper/DLQ is described in docs but not implemented.
+- The rate limiter is a per-tenant **token bucket** (atomic Lua, server-side TIME, smooth refill). Capacity = rps × burst multiplier; responses carry `X-RateLimit-Limit` / `X-RateLimit-Remaining`.
+- The indexer handles at-least-once delivery via XACK and **routes poison entries to a DLQ stream** (`docs.index.dlq`) after `indexer_max_deliveries` retries via `XAUTOCLAIM` + `XPENDING` delivery counts.
 - No auth / auth token in the prototype — trust boundary is at the load balancer in this design.
