@@ -4,7 +4,7 @@ Prototype of a multi-tenant, horizontally scalable document search service. Buil
 
 - [Architecture](docs/architecture.md)
 - [Production readiness analysis](docs/production-readiness.md)
-- [Experience showcase](docs/experience-showcase.md) (TODOs for you to fill in)
+- [Experience showcase](docs/experience-showcase.md)
 
 ## Stack
 
